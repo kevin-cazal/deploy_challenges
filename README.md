@@ -2,7 +2,7 @@
 
 Deploy [ctfcli](https://github.com/CTFd/ctfcli)-compatible challenge repositories to a CTFd instance.
 
-Challenge format: [osint_investigator_ctf_challenges](https://github.com/Manta-Epitech-Academy/osint_investigator_ctf_challenges) (folders with `challenge.yml`, optional `private/flag.txt.gpg`).
+Challenge repositories must follow the [ctfcli-compatible layout](CHALLENGE_REPOSITORY.md). Reference implementation: [osint_investigator_ctf_challenges](https://github.com/Manta-Epitech-Academy/osint_investigator_ctf_challenges).
 
 ## Docker image
 
