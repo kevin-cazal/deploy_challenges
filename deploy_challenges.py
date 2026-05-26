@@ -4,7 +4,7 @@ deploy_challenges.py — Deploy ctfcli-compatible challenges to a CTFd instance.
 
 Clones a challenge repository (or uses a local directory), discovers all
 challenge.yml files, installs them with ``ctf challenge install``, and
-optionally syncs flags from private/flag.txt.gpg or private/flag.txt.
+optionally syncs flags from private/flag.yml, flag.txt, or GPG-encrypted variants.
 
 Docker (recommended):
 
@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import configparser
+import json
 import os
 import shutil
 import subprocess
@@ -38,6 +39,7 @@ import tempfile
 import time
 from enum import Enum
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 import requests
@@ -100,10 +102,11 @@ def find_challenge_ymls(root: Path) -> list[Path]:
 
 def needs_gpg_passphrase(challenge_ymls: list[Path]) -> bool:
     """True if any challenge has an encrypted flag file."""
-    return any(
-        (yml.parent / "private" / "flag.txt.gpg").is_file()
-        for yml in challenge_ymls
-    )
+    for yml in challenge_ymls:
+        priv = yml.parent / "private"
+        if (priv / "flag.txt.gpg").is_file() or (priv / "flag.yml.gpg").is_file():
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -143,21 +146,27 @@ def decrypt_flag_file(flag_file: Path, passphrase: str) -> str:
         out_path.unlink(missing_ok=True)
 
 
+def decrypt_text_file(flag_file: Path) -> str:
+    """Decrypt a GPG-encrypted text file and return plaintext."""
+    passphrase = os.environ.get("GPG_PASSPHRASE")
+    if not passphrase:
+        raise RuntimeError(
+            f"{flag_file} requires GPG_PASSPHRASE to be set in the environment"
+        )
+    value = decrypt_flag_file(flag_file, passphrase)
+    if not value:
+        raise ValueError(f"decrypted file is empty for {flag_file}")
+    return value
+
+
 def read_flag_plaintext(challenge_dir: Path) -> str | None:
-    """Return flag value from private/flag.txt.gpg or private/flag.txt."""
-    gpg_file = challenge_dir / "private" / "flag.txt.gpg"
-    txt_file = challenge_dir / "private" / "flag.txt"
+    """Return static flag from private/flag.txt.gpg or private/flag.txt (legacy)."""
+    priv = challenge_dir / "private"
+    gpg_file = priv / "flag.txt.gpg"
+    txt_file = priv / "flag.txt"
 
     if gpg_file.is_file():
-        passphrase = os.environ.get("GPG_PASSPHRASE")
-        if not passphrase:
-            raise RuntimeError(
-                f"{gpg_file} requires GPG_PASSPHRASE to be set in the environment"
-            )
-        value = decrypt_flag_file(gpg_file, passphrase)
-        if not value:
-            raise ValueError(f"decrypted flag is empty for {gpg_file}")
-        return value
+        return decrypt_text_file(gpg_file)
 
     if txt_file.is_file():
         value = txt_file.read_text(encoding="utf-8").strip()
@@ -166,6 +175,64 @@ def read_flag_plaintext(challenge_dir: Path) -> str | None:
         return value
 
     return None
+
+
+def read_flag_yaml(challenge_dir: Path) -> dict | list | None:
+    """Load private/flag.yml or flag.yml.gpg."""
+    priv = challenge_dir / "private"
+    gpg_file = priv / "flag.yml.gpg"
+    yml_file = priv / "flag.yml"
+
+    if gpg_file.is_file():
+        text = decrypt_text_file(gpg_file)
+        return yaml.safe_load(text)
+
+    if yml_file.is_file():
+        return yaml.safe_load(yml_file.read_text(encoding="utf-8"))
+
+    return None
+
+
+def normalize_flag_definitions(raw: dict | list | None) -> list[dict[str, Any]]:
+    """Turn flag.yml content into a list of flag definition dicts."""
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return [dict(f) for f in raw]
+    if isinstance(raw, dict):
+        if "flags" in raw and isinstance(raw["flags"], list):
+            return [dict(f) for f in raw["flags"]]
+        return [dict(raw)]
+    raise ValueError(f"invalid flag.yml structure: {type(raw)}")
+
+
+def load_flag_definitions(challenge_dir: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """
+    Return (api_flags, plugin_specs).
+    api_flags: static/regex for CTFd /api/v1/flags.
+    plugin_specs: dynamic/custom for shell1_flags plugin.
+    """
+    raw = read_flag_yaml(challenge_dir)
+    definitions = normalize_flag_definitions(raw)
+
+    if not definitions:
+        txt = read_flag_plaintext(challenge_dir)
+        if txt:
+            definitions = [
+                {"type": "static", "content": txt, "data": "case_sensitive"}
+            ]
+
+    api_flags: list[dict[str, Any]] = []
+    plugin_specs: list[dict[str, Any]] = []
+    for spec in definitions:
+        ftype = str(spec.get("type", "static")).lower()
+        if ftype in ("static", "regex"):
+            api_flags.append(spec)
+        elif ftype in ("dynamic", "custom"):
+            plugin_specs.append(spec)
+        else:
+            raise ValueError(f"unknown flag type '{ftype}' in {challenge_dir}")
+    return api_flags, plugin_specs
 
 
 def get_challenge_name(yml: Path) -> str:
@@ -199,54 +266,110 @@ def get_challenge_id(base_url: str, token: str, challenge_name: str) -> int | No
     return None
 
 
-def set_challenge_flag(
-    base_url: str, token: str, challenge_id: int, flag_value: str
-) -> None:
-    """Create or update a static flag for a challenge via CTFd API."""
-    headers = {
+def _api_headers(token: str) -> dict[str, str]:
+    return {
         "Authorization": f"Token {token}",
         "Content-Type": "application/json",
     }
-    try:
-        r = requests.get(f"{base_url}/api/v1/flags", headers=headers, timeout=15)
-        r.raise_for_status()
-        flags = r.json().get("data", [])
-        existing = [
-            f
-            for f in flags
-            if f.get("challenge_id") == challenge_id and isinstance(f.get("id"), int)
-        ]
 
-        payload = {
-            "challenge_id": challenge_id,
-            "type": "static",
-            "content": flag_value,
-            "data": "",
-        }
 
-        if existing:
-            first = existing[0]
-            requests.patch(
-                f"{base_url}/api/v1/flags/{first['id']}",
+def delete_challenge_flags(base_url: str, token: str, challenge_id: int) -> None:
+    headers = _api_headers(token)
+    r = requests.get(f"{base_url}/api/v1/flags", headers=headers, timeout=15)
+    r.raise_for_status()
+    for f in r.json().get("data", []):
+        if f.get("challenge_id") == challenge_id and isinstance(f.get("id"), int):
+            requests.delete(
+                f"{base_url}/api/v1/flags/{f['id']}",
                 headers=headers,
-                json=payload,
                 timeout=15,
             ).raise_for_status()
-            for extra in existing[1:]:
-                requests.delete(
-                    f"{base_url}/api/v1/flags/{extra['id']}",
-                    headers=headers,
-                    timeout=15,
-                ).raise_for_status()
-        else:
-            requests.post(
-                f"{base_url}/api/v1/flags",
-                headers=headers,
-                json=payload,
-                timeout=15,
-            ).raise_for_status()
-    except requests.RequestException as e:
-        raise RuntimeError(f"CTFd flag API error: {e}") from e
+
+
+def post_challenge_flag(
+    base_url: str, token: str, challenge_id: int, spec: dict[str, Any]
+) -> str:
+    """POST one static or regex flag. Returns type string for logging."""
+    ftype = str(spec.get("type", "static")).lower()
+    if ftype not in ("static", "regex"):
+        raise ValueError(f"cannot POST flag type '{ftype}' to CTFd API")
+    content = str(spec.get("content", "")).strip()
+    if not content:
+        raise ValueError("flag content is empty")
+    data = spec.get("data") or (
+        "case_insensitive" if ftype == "regex" else "case_sensitive"
+    )
+    payload = {
+        "challenge_id": challenge_id,
+        "type": ftype,
+        "content": content,
+        "data": data,
+    }
+    requests.post(
+        f"{base_url}/api/v1/flags",
+        headers=_api_headers(token),
+        json=payload,
+        timeout=15,
+    ).raise_for_status()
+    return ftype
+
+
+def sync_challenge_flags(
+    base_url: str, token: str, challenge_id: int, api_flags: list[dict[str, Any]]
+) -> list[str]:
+    """Replace all CTFd flags for a challenge with api_flags. Returns synced types."""
+    delete_challenge_flags(base_url, token, challenge_id)
+    synced: list[str] = []
+    for spec in api_flags:
+        synced.append(post_challenge_flag(base_url, token, challenge_id, spec))
+    return synced
+
+
+def patch_challenge_shell1_spec(
+    base_url: str,
+    token: str,
+    challenge_id: int,
+    plugin_specs: list[dict[str, Any]],
+) -> None:
+    """Store dynamic/custom flag specs in challenge connection_info JSON."""
+    if not plugin_specs:
+        return
+    headers = _api_headers(token)
+    r = requests.get(
+        f"{base_url}/api/v1/challenges/{challenge_id}",
+        headers=headers,
+        timeout=15,
+    )
+    r.raise_for_status()
+    chal = r.json().get("data") or {}
+    conn_raw = chal.get("connection_info")
+    if isinstance(conn_raw, str) and conn_raw.strip():
+        try:
+            conn = json.loads(conn_raw)
+        except json.JSONDecodeError:
+            conn = {}
+    elif isinstance(conn_raw, dict):
+        conn = conn_raw
+    else:
+        conn = {}
+    conn["shell1_flag"] = (
+        plugin_specs[0] if len(plugin_specs) == 1 else plugin_specs
+    )
+    requests.patch(
+        f"{base_url}/api/v1/challenges/{challenge_id}",
+        headers=headers,
+        json={"connection_info": json.dumps(conn, ensure_ascii=False)},
+        timeout=15,
+    ).raise_for_status()
+
+
+def write_flag_specs_manifest(challenge_root: Path, specs: dict[str, Any]) -> None:
+    deploy_dir = challenge_root / ".deploy"
+    deploy_dir.mkdir(parents=True, exist_ok=True)
+    (deploy_dir / "flag_specs.json").write_text(
+        json.dumps(specs, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
 
 
 def sync_challenge_flag(
@@ -255,23 +378,37 @@ def sync_challenge_flag(
     token: str,
     *,
     sync_flags: bool,
-) -> FlagSyncResult:
-    """Update CTFd flag after a successful ctfcli install."""
+    manifest: dict[str, Any],
+) -> tuple[FlagSyncResult, str]:
+    """Update CTFd flags and manifest after a successful ctfcli install."""
     if not sync_flags:
-        return FlagSyncResult.SKIPPED
+        return FlagSyncResult.SKIPPED, ""
 
     challenge_dir = yml.parent
-    flag_value = read_flag_plaintext(challenge_dir)
-    if flag_value is None:
-        return FlagSyncResult.SKIPPED
+    api_flags, plugin_specs = load_flag_definitions(challenge_dir)
+    if not api_flags and not plugin_specs:
+        return FlagSyncResult.SKIPPED, ""
 
     api_name = get_challenge_name(yml)
     challenge_id = get_challenge_id(base_url, token, api_name)
     if challenge_id is None:
         raise RuntimeError(f"challenge '{api_name}' not found in CTFd")
 
-    set_challenge_flag(base_url, token, challenge_id, flag_value)
-    return FlagSyncResult.SYNCED
+    detail_parts: list[str] = []
+    if api_flags:
+        types = sync_challenge_flags(base_url, token, challenge_id, api_flags)
+        detail_parts.append(",".join(types))
+    if plugin_specs:
+        patch_challenge_shell1_spec(base_url, token, challenge_id, plugin_specs)
+        root = Path(manifest["_root"])
+        try:
+            rel = str(yml.parent.relative_to(root))
+        except ValueError:
+            rel = str(yml.parent)
+        manifest[api_name] = {"path": rel, "specs": plugin_specs}
+        detail_parts.append("plugin")
+
+    return FlagSyncResult.SYNCED, "+".join(detail_parts)
 
 
 # ---------------------------------------------------------------------------
@@ -353,6 +490,7 @@ def deploy_challenges(
     base_url: str,
     token: str,
     timeout: int,
+    challenge_root: Path,
     *,
     force: bool = False,
     sync_flags: bool = True,
@@ -376,6 +514,7 @@ def deploy_challenges(
     work_dir = Path(tempfile.mkdtemp(prefix="ctfcli-deploy-"))
     create_ctfcli_project(work_dir, base_url, token)
 
+    manifest: dict[str, Any] = {"_root": str(challenge_root.resolve())}
     ok = 0
     for yml in challenge_ymls:
         challenge_dir = yml.parent
@@ -404,18 +543,18 @@ def deploy_challenges(
 
             if install_ok or duplicate:
                 try:
-                    flag_result = sync_challenge_flag(
-                        yml, base_url, token, sync_flags=sync_flags
+                    flag_result, flag_detail = sync_challenge_flag(
+                        yml, base_url, token, sync_flags=sync_flags, manifest=manifest
                     )
                     if duplicate:
                         suffix = (
-                            "already exists, flag synced"
+                            f"already exists, flag synced ({flag_detail})"
                             if flag_result == FlagSyncResult.SYNCED
                             else "already exists"
                         )
                         print(f"    ⏭  {challenge_name} ({suffix})")
                     elif flag_result == FlagSyncResult.SYNCED:
-                        print(f"    ✔ {challenge_name} (flag synced)")
+                        print(f"    ✔ {challenge_name} (flag synced: {flag_detail})")
                     else:
                         print(f"    ✔ {challenge_name}")
                     ok += 1
@@ -430,6 +569,9 @@ def deploy_challenges(
             print(f"    ✘ {challenge_name}: {e}")
 
     shutil.rmtree(work_dir, ignore_errors=True)
+    if sync_flags and len(manifest) > 1:
+        write_flag_specs_manifest(challenge_root, manifest)
+        print(f"  ✔ Wrote {challenge_root / '.deploy' / 'flag_specs.json'}")
     print(f"  => {ok}/{len(challenge_ymls)} challenge(s) deployed")
     return ok
 
@@ -529,7 +671,7 @@ def main() -> None:
     if sync_flags and needs_gpg_passphrase(challenge_ymls):
         if not os.environ.get("GPG_PASSPHRASE"):
             print(
-                "Error: at least one challenge has private/flag.txt.gpg "
+                "Error: at least one challenge has private/flag.txt.gpg or flag.yml.gpg "
                 "but GPG_PASSPHRASE is not set.",
                 file=sys.stderr,
             )
@@ -548,6 +690,7 @@ def main() -> None:
         base_url=base_url,
         token=token,
         timeout=args.wait,
+        challenge_root=challenge_root,
         force=args.force,
         sync_flags=sync_flags,
     )

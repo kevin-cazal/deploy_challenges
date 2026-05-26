@@ -55,6 +55,10 @@ docker run --rm \
 | `--force` | Re-sync existing challenges |
 | `--wait` | Seconds to wait for CTFd (default 60) |
 | `--no-sync-flags` | Skip GPG/API flag sync |
+| `GPG_PASSPHRASE` | Decrypt `private/flag.txt.gpg` or `flag.yml.gpg` |
+| `SHELL1_FLAG_SECRET` | CTFd env for `type: dynamic` flags (plugin) |
+
+Flag sync supports **`private/flag.yml`** (`static`, `regex`, `dynamic`, `custom`) and legacy **`private/flag.txt`**. See [CHALLENGE_REPOSITORY.md](CHALLENGE_REPOSITORY.md).
 
 ## Build locally
 

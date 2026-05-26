@@ -86,31 +86,73 @@ Challenges with only a `description` and no attachments are valid (description-o
 
 ## Flags and `private/`
 
-Flags must not be committed in plaintext. Typical layout:
+Flags must not be committed in plaintext when they reveal exact answers. Layout:
 
 | Path | Committed | Used by deploy_challenges |
 |------|-----------|---------------------------|
-| `private/flag.txt.gpg` | yes | Decrypted with `GPG_PASSPHRASE`, then set on CTFd via API |
-| `private/flag.txt` | **no** (gitignored) | Read if present (e.g. after local `./decrypt.sh`) |
-| `private/writeup.md.gpg` | yes | Organizer only; not deployed |
+| `private/flag.yml` | optional (gitignored if secret) | Parsed: **static** / **regex** → CTFd API; **dynamic** / **custom** → plugin manifest |
+| `private/flag.yml.gpg` | yes | Decrypted with `GPG_PASSPHRASE` |
+| `private/flag.txt` | **no** (gitignored) | Shorthand: one `static` flag |
+| `private/flag.txt.gpg` | yes | Decrypted static flag |
+| `private/writeup.md` | yes (optional) | Organizer only; not deployed |
 
-After `ctf challenge install`, the deployer syncs the flag separately (ctfcli does not install GPG-encrypted flags from the repo).
+After `ctf challenge install`, the deployer syncs flags via API and writes `.deploy/flag_specs.json` for the [shell1_flags](https://github.com/CTFd/CTFd) plugin (dynamic / custom).
+
+### `private/flag.yml` schema
+
+**Single regex flag** (ambiguous free-text answers):
+
+```yaml
+type: regex
+content: '^shell1\{[^}]*(calendrier|calendar)[^}]*\}$'
+data: case_insensitive
+```
+
+**Multiple flags** (any match):
+
+```yaml
+flags:
+  - type: static
+    content: shell1{sq6943}
+    data: case_sensitive
+  - type: static
+    content: shell1{af8882}
+    data: case_sensitive
+```
+
+**Dynamic** (per-team flag; validated by `shell1_flags` plugin, not CTFd core):
+
+```yaml
+type: dynamic
+algorithm: hmac-sha256
+secret_env: SHELL1_FLAG_SECRET
+template: 'shell1{{{digest}}}'
+```
+
+**Custom** (Python validator under `scripts/flag_validators/` in the shell-1 repo):
+
+```yaml
+type: custom
+validator: delivery_101
+```
+
+CTFd’s `/api/v1/flags` endpoint only accepts **static** and **regex**. `dynamic` / `custom` entries are stored in `challenges/.deploy/flag_specs.json` and challenge `connection_info` JSON (`shell1_flag` key) for the plugin.
 
 ### Flag in description only
 
-Some challenges (e.g. **Tutoriel**) embed the flag in the public `description` for onboarding. They may have no `private/flag.txt.gpg`. Deploy still succeeds; flag API sync is skipped when no flag file exists.
+Some challenges (e.g. **Tutoriel**) embed the flag in the public `description` for onboarding. They may have no flag files. Deploy still succeeds; flag sync is skipped when nothing is defined.
 
 ### GPG workflow (challenge repo)
 
-At the **challenge repository** root (not in deploy_challenges):
+At the **challenges/** root (shell-1) or challenge repo root:
 
 ```bash
-export GPG_PASSPHRASE="$(cat .gpg-passphrase)"   # never commit .gpg-passphrase
-./decrypt.sh    # before editing flags or writeups
+export GPG_PASSPHRASE='…'   # never commit .gpg-passphrase
+./decrypt.sh    # before editing flags
 ./encrypt.sh    # before git commit
 ```
 
-`deploy_challenges` decrypts `flag.txt.gpg` in-process when `GPG_PASSPHRASE` is set; you do not need to run `decrypt.sh` before deploy unless you want plaintext files locally.
+`deploy_challenges` decrypts `flag.txt.gpg` / `flag.yml.gpg` in-process when `GPG_PASSPHRASE` is set.
 
 ## How deploy_challenges uses a repo
 
@@ -118,14 +160,15 @@ export GPG_PASSPHRASE="$(cat .gpg-passphrase)"   # never commit .gpg-passphrase
 2. Optionally restrict to `--subdir` (e.g. `challenges`).
 3. Find all `challenge.yml` files.
 4. For each file: run `ctf challenge install <path>` against `--url` / `--token`.
-5. If `private/flag.txt.gpg` or `private/flag.txt` exists, update the CTFd static flag via API (unless `--no-sync-flags`).
+5. Sync flags from `private/flag.yml` / `flag.txt` (unless `--no-sync-flags`): POST static/regex to CTFd; write plugin specs to `.deploy/flag_specs.json`.
 
 | Deploy flag | Effect |
 |-------------|--------|
 | `--subdir challenges` | Root for discovery is `<repo>/challenges/` |
 | `--force` | Pass `--force` to ctfcli (overwrite existing challenges) |
 | `--no-sync-flags` | Skip step 5 |
-| `GPG_PASSPHRASE` | Required only when any selected challenge has `private/flag.txt.gpg` |
+| `GPG_PASSPHRASE` | Required when any challenge has `flag.txt.gpg` or `flag.yml.gpg` |
+| `SHELL1_FLAG_SECRET` | Required at CTFd runtime for `type: dynamic` flags (plugin) |
 
 Prerequisites, unlock chains, and other CTFd relationships are configured in the CTFd admin UI after deploy.
 
