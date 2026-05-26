@@ -249,6 +249,7 @@ def get_challenge_id(base_url: str, token: str, challenge_name: str) -> int | No
     try:
         r = requests.get(
             f"{base_url}/api/v1/challenges",
+            params={"view": "admin"},
             headers={
                 "Authorization": f"Token {token}",
                 "Content-Type": "application/json",
