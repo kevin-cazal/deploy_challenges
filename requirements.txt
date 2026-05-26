@@ -1,0 +1,3 @@
+ctfcli
+pyyaml
+requests
