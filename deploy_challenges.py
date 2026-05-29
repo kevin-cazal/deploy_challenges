@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import configparser
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -218,18 +219,25 @@ def load_flag_definitions(challenge_dir: Path) -> tuple[list[dict[str, Any]], li
     if not definitions:
         txt = read_flag_plaintext(challenge_dir)
         if txt:
+            data = "case_sensitive"
+            if re.fullmatch(r"shell1\{[A-D]\}", txt.strip(), re.IGNORECASE):
+                data = "case_insensitive"
             definitions = [
-                {"type": "static", "content": txt, "data": "case_sensitive"}
+                {"type": "static", "content": txt.strip(), "data": data}
             ]
 
     api_flags: list[dict[str, Any]] = []
     plugin_specs: list[dict[str, Any]] = []
     for spec in definitions:
         ftype = str(spec.get("type", "static")).lower()
-        if ftype in ("static", "regex"):
+        if ftype == "static":
             api_flags.append(spec)
-        elif ftype in ("dynamic", "custom"):
-            plugin_specs.append(spec)
+        elif ftype in ("regex", "dynamic", "custom"):
+            print(
+                f"  ⚠ {challenge_dir.name}: ignoring flag.yml type={ftype} "
+                f"(use private/flag.txt static flag only)",
+                file=sys.stderr,
+            )
         else:
             raise ValueError(f"unknown flag type '{ftype}' in {challenge_dir}")
     return api_flags, plugin_specs
@@ -242,6 +250,65 @@ def get_challenge_name(yml: Path) -> str:
     if not isinstance(name, str) or not name.strip():
         raise ValueError("Missing or invalid 'name' in challenge.yml")
     return name.strip()
+
+
+def parse_challenge_requirements(
+    yml: Path,
+) -> tuple[list[str], bool] | None:
+    """Return (prerequisite challenge names, anonymize) or None if no requirements."""
+    data = yaml.safe_load(yml.read_text(encoding="utf-8")) or {}
+    req = data.get("requirements")
+    if not req:
+        return None
+    if isinstance(req, dict):
+        raw = req.get("prerequisites") or []
+        names = [str(x) for x in raw if x]
+        anonymize = bool(req.get("anonymize", False))
+        return names, anonymize
+    if isinstance(req, list):
+        return [str(x) for x in req if x], False
+    return None
+
+
+def sync_challenge_requirements(
+    base_url: str,
+    token: str,
+    challenge_id: int,
+    yml: Path,
+) -> None:
+    """PATCH CTFd prerequisites (hidden until unlocked when anonymize is false)."""
+    parsed = parse_challenge_requirements(yml)
+    if not parsed:
+        return
+    names, anonymize = parsed
+    headers = _api_headers(token)
+    r = requests.get(
+        f"{base_url}/api/v1/challenges",
+        params={"view": "admin"},
+        headers=headers,
+        timeout=15,
+    )
+    r.raise_for_status()
+    by_name = {c["name"]: c["id"] for c in r.json().get("data", []) if c.get("name")}
+    prereq_ids: list[int] = []
+    for name in names:
+        cid = by_name.get(name)
+        if isinstance(cid, int):
+            prereq_ids.append(cid)
+    prereq_ids = sorted(set(prereq_ids))
+    if challenge_id in prereq_ids:
+        prereq_ids.remove(challenge_id)
+    requests.patch(
+        f"{base_url}/api/v1/challenges/{challenge_id}",
+        headers=headers,
+        json={
+            "requirements": {
+                "prerequisites": prereq_ids,
+                "anonymize": anonymize,
+            }
+        },
+        timeout=15,
+    ).raise_for_status()
 
 
 def get_challenge_id(base_url: str, token: str, challenge_name: str) -> int | None:
@@ -544,6 +611,12 @@ def deploy_challenges(
 
             if install_ok or duplicate:
                 try:
+                    api_name = get_challenge_name(yml)
+                    cid = get_challenge_id(base_url, token, api_name)
+                    if cid is not None:
+                        sync_challenge_requirements(
+                            base_url, token, cid, yml
+                        )
                     flag_result, flag_detail = sync_challenge_flag(
                         yml, base_url, token, sync_flags=sync_flags, manifest=manifest
                     )
