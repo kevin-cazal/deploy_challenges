@@ -641,6 +641,21 @@ def verify_token(base_url: str, token: str) -> str | None:
 # Git helpers
 # ---------------------------------------------------------------------------
 
+def _is_ssh_repo_url(repo_url: str) -> bool:
+    return repo_url.startswith("git@") or repo_url.startswith("ssh://")
+
+
+def _ssh_clone_hint(repo_url: str) -> str:
+    if not _is_ssh_repo_url(repo_url):
+        return ""
+    return (
+        "\n  SSH clone failed. Mount your key into the container, e.g.:\n"
+        '    -v "$HOME/.ssh:/root/.ssh:ro"\n'
+        "  Or forward ssh-agent:\n"
+        '    -v "$SSH_AUTH_SOCK:/ssh-agent" -e SSH_AUTH_SOCK=/ssh-agent'
+    )
+
+
 def clone_or_pull(repo_url: str, dest: Path) -> None:
     """Clone the repo, or pull if it already exists."""
     if (dest / ".git").is_dir():
@@ -840,7 +855,7 @@ def main() -> None:
             clone_or_pull(args.source, challenge_root)
         except subprocess.CalledProcessError as e:
             stderr = e.stderr.decode() if isinstance(e.stderr, bytes) else e.stderr
-            print(f"Error cloning repo: {stderr}", file=sys.stderr)
+            print(f"Error cloning repo: {stderr}{_ssh_clone_hint(args.source)}", file=sys.stderr)
             shutil.rmtree(cleanup_dir, ignore_errors=True)
             sys.exit(1)
 

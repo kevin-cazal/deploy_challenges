@@ -31,6 +31,40 @@ docker run --rm \
 
 On macOS/Windows Docker Desktop, `host.docker.internal` is usually available without `--add-host`.
 
+### Deploy from a private git repo (SSH)
+
+The image includes `openssh-client` and GitHub host keys. Mount your SSH key (or agent):
+
+```bash
+export GPG_PASSPHRASE='…'
+
+docker run --rm \
+  -e GPG_PASSPHRASE \
+  -v "$HOME/.ssh:/root/.ssh:ro" \
+  ghcr.io/kevin-cazal/deploy_challenges:latest \
+  git@github.com:kevin-cazal/shell-1-challenges.git \
+  --url https://YOUR_CTFD_HOST/ctfd/default \
+  --token ctfd_YOUR_ADMIN_TOKEN \
+  --force
+```
+
+With **ssh-agent** instead of mounting keys:
+
+```bash
+docker run --rm \
+  -e GPG_PASSPHRASE \
+  -v "$SSH_AUTH_SOCK:/ssh-agent" \
+  -e SSH_AUTH_SOCK=/ssh-agent \
+  ghcr.io/kevin-cazal/deploy_challenges:latest \
+  git@github.com:kevin-cazal/shell-1-challenges.git \
+  --url https://YOUR_CTFD_HOST/ctfd/default \
+  --token ctfd_YOUR_ADMIN_TOKEN \
+  --force
+```
+
+HTTPS private repos work too — embed a GitHub PAT in the URL:
+`https://x-access-token:TOKEN@github.com/owner/repo.git`
+
 ### Local challenge directory
 
 ```bash
@@ -84,7 +118,7 @@ export GPG_PASSPHRASE='…'
 .venv/bin/python deploy_challenges.py … --url … --token …
 ```
 
-Requires **git** and **gpg** on the host for clone and encrypted flags.
+Requires **git**, **gpg**, and **openssh-client** (for `git@…` URLs) on the host for clone and encrypted flags.
 
 ## License
 

@@ -1,8 +1,10 @@
 FROM python:3.12-slim-bookworm
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git gnupg \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get install -y --no-install-recommends git gnupg openssh-client \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /root/.ssh \
+    && ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> /root/.ssh/known_hosts
 
 WORKDIR /app
 
