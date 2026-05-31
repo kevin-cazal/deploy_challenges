@@ -311,6 +311,53 @@ def sync_challenge_requirements(
     ).raise_for_status()
 
 
+def find_home_page(challenge_root: Path) -> Path | None:
+    """Return challenges/index.html when present at the deploy root."""
+    p = challenge_root / "index.html"
+    return p if p.is_file() else None
+
+
+def sync_ctfd_home_page(base_url: str, token: str, html_path: Path) -> None:
+    """Create or update CTFd page route ``index`` from an HTML fragment file."""
+    content = html_path.read_text(encoding="utf-8")
+    headers = _api_headers(token)
+    r = requests.get(
+        f"{base_url}/api/v1/pages",
+        headers=headers,
+        timeout=15,
+    )
+    r.raise_for_status()
+    pages = r.json().get("data", [])
+    index_page = next(
+        (p for p in pages if p.get("route") == "index" and isinstance(p.get("id"), int)),
+        None,
+    )
+    payload: dict[str, Any] = {
+        "route": "index",
+        "content": content,
+        "format": "html",
+        "draft": False,
+        "hidden": False,
+        "auth_required": False,
+    }
+    if index_page:
+        payload["title"] = index_page.get("title") or "Accueil"
+        requests.patch(
+            f"{base_url}/api/v1/pages/{index_page['id']}",
+            headers=headers,
+            json=payload,
+            timeout=15,
+        ).raise_for_status()
+    else:
+        payload["title"] = "Accueil"
+        requests.post(
+            f"{base_url}/api/v1/pages",
+            headers=headers,
+            json=payload,
+            timeout=15,
+        ).raise_for_status()
+
+
 def get_challenge_id(base_url: str, token: str, challenge_name: str) -> int | None:
     """Find challenge ID in CTFd by exact challenge name."""
     try:
@@ -768,6 +815,17 @@ def main() -> None:
         force=args.force,
         sync_flags=sync_flags,
     )
+
+    home_page = find_home_page(challenge_root)
+    if home_page:
+        try:
+            sync_ctfd_home_page(base_url, token, home_page)
+            print("\n  ✔ CTFd home page (index) updated from index.html")
+        except requests.RequestException as e:
+            print(f"\n  ✘ CTFd home page sync failed: {e}", file=sys.stderr)
+            if cleanup_dir:
+                shutil.rmtree(cleanup_dir, ignore_errors=True)
+            sys.exit(1)
 
     if cleanup_dir:
         shutil.rmtree(cleanup_dir, ignore_errors=True)

@@ -11,6 +11,7 @@ A challenge repo is a git tree (or local directory) containing one folder per ch
 ```text
 my_ctf_challenges/
 ├── README.md
+├── index.html              # optional — CTFd home page (HTML fragment); see deploy_challenges
 ├── encrypt.sh              # optional — GPG workflow at repo root
 ├── decrypt.sh
 ├── challenges/             # common root; use --subdir challenges when deploying

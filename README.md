@@ -58,6 +58,10 @@ docker run --rm \
 | `GPG_PASSPHRASE` | Decrypt `private/flag.txt.gpg` or `flag.yml.gpg` |
 | `SHELL1_FLAG_SECRET` | CTFd env for `type: dynamic` flags (plugin) |
 
+### CTFd home page
+
+If the challenge root contains **`index.html`** (HTML fragment), deploy updates the CTFd page with route **`index`** (create or patch). Omit the file to leave the instance home page unchanged.
+
 Flag sync supports **`private/flag.yml`** (`static`, `regex`, `dynamic`, `custom`) and legacy **`private/flag.txt`**. See [CHALLENGE_REPOSITORY.md](CHALLENGE_REPOSITORY.md).
 
 ## Build locally
