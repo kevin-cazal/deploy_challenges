@@ -46,6 +46,8 @@ from urllib.parse import urlparse
 import requests
 import yaml
 
+MD_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
+
 # ---------------------------------------------------------------------------
 # Resolve ctfcli binary
 # ---------------------------------------------------------------------------
@@ -309,6 +311,75 @@ def sync_challenge_requirements(
         },
         timeout=15,
     ).raise_for_status()
+
+
+def application_root(base_url: str) -> str:
+    """Path prefix for CTFd (e.g. ``/ctfd/default``), or empty at site root."""
+    return (urlparse(base_url.rstrip("/")).path or "").rstrip("/")
+
+
+def challenge_file_url_map(
+    base_url: str, token: str, challenge_id: int
+) -> dict[str, str]:
+    """Map attachment basename -> public ``/files/`` URL (no download token)."""
+    headers = _api_headers(token)
+    r = requests.get(
+        f"{base_url.rstrip('/')}/api/v1/challenges/{challenge_id}",
+        headers=headers,
+        timeout=15,
+    )
+    r.raise_for_status()
+    data = r.json().get("data", {})
+    root = application_root(base_url)
+    out: dict[str, str] = {}
+    for file_url in data.get("files") or []:
+        if not isinstance(file_url, str) or "/files/" not in file_url:
+            continue
+        path = file_url.split("?", 1)[0]
+        location = path.split("/files/", 1)[-1]
+        basename = location.rsplit("/", 1)[-1]
+        out[basename] = f"{root}/files/{location}"
+    return out
+
+
+def rewrite_description_image_links(
+    description: str, file_urls: dict[str, str]
+) -> str:
+    """Replace ``![alt](file.png)`` with CTFd ``/files/`` URLs when uploaded."""
+    if not file_urls:
+        return description
+
+    def repl(match: re.Match[str]) -> str:
+        alt, path = match.group(1), match.group(2)
+        if path.startswith(("http://", "https://", "/")):
+            return match.group(0)
+        name = path.split("/")[-1]
+        if name not in file_urls:
+            return match.group(0)
+        return f"![{alt}]({file_urls[name]})"
+
+    return MD_IMAGE_RE.sub(repl, description)
+
+
+def sync_challenge_description_images(
+    base_url: str, token: str, challenge_id: int, yml: Path
+) -> bool:
+    """Patch challenge description so embedded markdown images use CTFd file URLs."""
+    data = yaml.safe_load(yml.read_text(encoding="utf-8")) or {}
+    description = data.get("description")
+    if not isinstance(description, str) or "![" not in description:
+        return False
+    file_urls = challenge_file_url_map(base_url, token, challenge_id)
+    new_desc = rewrite_description_image_links(description, file_urls)
+    if new_desc == description:
+        return False
+    requests.patch(
+        f"{base_url.rstrip('/')}/api/v1/challenges/{challenge_id}",
+        headers=_api_headers(token),
+        json={"description": new_desc},
+        timeout=15,
+    ).raise_for_status()
+    return True
 
 
 def find_home_page(challenge_root: Path) -> Path | None:
@@ -662,6 +733,9 @@ def deploy_challenges(
                     cid = get_challenge_id(base_url, token, api_name)
                     if cid is not None:
                         sync_challenge_requirements(
+                            base_url, token, cid, yml
+                        )
+                        sync_challenge_description_images(
                             base_url, token, cid, yml
                         )
                     flag_result, flag_detail = sync_challenge_flag(

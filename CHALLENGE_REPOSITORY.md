@@ -83,6 +83,17 @@ files:
   - notes.txt
 ```
 
+Embed images in the `description` with markdown, using the **filename only**:
+
+```yaml
+description: |
+  ![Screenshot](evidence.png)
+files:
+  - evidence.png
+```
+
+`deploy_challenges` uploads the files then rewrites those links to CTFd `/files/…` URLs (including your instance path prefix, e.g. `/ctfd/default/files/…`).
+
 Challenges with only a `description` and no attachments are valid (description-only / awaiting assets).
 
 ## Flags and `private/`

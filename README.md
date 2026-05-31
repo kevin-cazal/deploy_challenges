@@ -62,6 +62,10 @@ docker run --rm \
 
 If the challenge root contains **`index.html`** (HTML fragment), deploy updates the CTFd page with route **`index`** (create or patch). Omit the file to leave the instance home page unchanged.
 
+### Images in challenge descriptions
+
+Markdown like `![alt](screenshot.png)` is rewritten to CTFd file URLs (`/files/…`) after install, using attachments listed in `files:`. Keep images next to `challenge.yml` and list them under `files:` (see [CHALLENGE_REPOSITORY.md](CHALLENGE_REPOSITORY.md)).
+
 Flag sync supports **`private/flag.yml`** (`static`, `regex`, `dynamic`, `custom`) and legacy **`private/flag.txt`**. See [CHALLENGE_REPOSITORY.md](CHALLENGE_REPOSITORY.md).
 
 ## Build locally
