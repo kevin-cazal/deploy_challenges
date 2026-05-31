@@ -645,12 +645,25 @@ def _is_ssh_repo_url(repo_url: str) -> bool:
     return repo_url.startswith("git@") or repo_url.startswith("ssh://")
 
 
+def _git_env_for_clone(repo_url: str) -> dict[str, str] | None:
+    """Environment for git when cloning over SSH."""
+    if not _is_ssh_repo_url(repo_url):
+        return None
+    env = os.environ.copy()
+    if "GIT_SSH_COMMAND" not in env:
+        # Host-mounted ~/.ssh/config often has wrong owner/perms inside Docker.
+        env["GIT_SSH_COMMAND"] = "ssh -F /dev/null -o BatchMode=yes"
+    return env
+
+
 def _ssh_clone_hint(repo_url: str) -> str:
     if not _is_ssh_repo_url(repo_url):
         return ""
     return (
         "\n  SSH clone failed. Mount your key into the container, e.g.:\n"
         '    -v "$HOME/.ssh:/root/.ssh:ro"\n'
+        "  Or mount only the private key (avoids config permission issues):\n"
+        '    -v "$HOME/.ssh/id_ed25519:/root/.ssh/id_ed25519:ro"\n'
         "  Or forward ssh-agent:\n"
         '    -v "$SSH_AUTH_SOCK:/ssh-agent" -e SSH_AUTH_SOCK=/ssh-agent'
     )
@@ -658,12 +671,14 @@ def _ssh_clone_hint(repo_url: str) -> str:
 
 def clone_or_pull(repo_url: str, dest: Path) -> None:
     """Clone the repo, or pull if it already exists."""
+    git_env = _git_env_for_clone(repo_url)
     if (dest / ".git").is_dir():
         print(f"  Pulling {repo_url} ...")
         subprocess.run(
             ["git", "-C", str(dest), "pull", "--ff-only"],
             check=True,
             capture_output=True,
+            env=git_env,
         )
     else:
         print(f"  Cloning {repo_url} ...")
@@ -671,6 +686,7 @@ def clone_or_pull(repo_url: str, dest: Path) -> None:
             ["git", "clone", "--depth", "1", repo_url, str(dest)],
             check=True,
             capture_output=True,
+            env=git_env,
         )
 
 

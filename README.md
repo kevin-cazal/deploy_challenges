@@ -33,7 +33,9 @@ On macOS/Windows Docker Desktop, `host.docker.internal` is usually available wit
 
 ### Deploy from a private git repo (SSH)
 
-The image includes `openssh-client` and GitHub host keys. Mount your SSH key (or agent):
+The image includes `openssh-client` and GitHub host keys. Mount your SSH key (or agent).
+Git clone uses `ssh -F /dev/null` by default so a host-mounted `~/.ssh/config` with
+wrong ownership inside Docker does not block the clone.
 
 ```bash
 export GPG_PASSPHRASE='…'
